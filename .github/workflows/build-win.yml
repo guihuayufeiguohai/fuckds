@@ -1,0 +1,138 @@
+name: 打包 Windows 绿色一键包
+
+# 两种用法都兼容：
+#  A) fork 本仓库后加这个文件 —— Actions 直接打包 fork 里的源码
+#  B) 新建一个空仓库只放这个文件 —— 脚本会自动 clone 上游源码
+on:
+  workflow_dispatch:
+    inputs:
+      with_admin:
+        description: '同时构建 /admin 网页控制台（更慢、包更大）'
+        type: boolean
+        default: false
+      publish_release:
+        description: '同时发布到 Release（获得永久下载直链）'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: 检出（fork 模式下就是源码）
+        uses: actions/checkout@v4
+
+      - name: 准备 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.14.0'
+
+      - name: 准备 Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.4'
+
+      - name: 构建并组装绿色包
+        shell: pwsh
+        env:
+          WITH_ADMIN: ${{ inputs.with_admin }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $Work = $env:GITHUB_WORKSPACE
+
+          # ---------- 0. 定位源码 ----------
+          $Repo = (Get-Location).Path
+          if (-not (Test-Path (Join-Path $Repo 'package.json'))) {
+            $Repo = Join-Path $env:RUNNER_TEMP 'fuckds-src'
+            if (Test-Path $Repo) { Remove-Item $Repo -Recurse -Force }
+            Write-Host "当前仓库没有源码，克隆上游到 $Repo"
+            git clone --depth 1 https://github.com/xingling66666/fuckds.git $Repo
+            if ($LASTEXITCODE -ne 0) { throw 'git clone 失败' }
+          }
+          Set-Location $Repo
+          Write-Host "源码目录：$Repo"
+
+          # ---------- 1. 依赖 + PoW 求解器 ----------
+          $env:PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = '1'   # direct 引擎不需要 Chromium
+          npm install
+          if ($LASTEXITCODE -ne 0) { throw 'npm install 失败' }
+
+          if ($env:WITH_ADMIN -eq 'true') {
+            npm run admin:install
+            if ($LASTEXITCODE -ne 0) { throw 'admin:install 失败' }
+            npm run admin:build
+            if ($LASTEXITCODE -ne 0) { throw 'admin:build 失败' }
+          }
+
+          New-Item -ItemType Directory -Path bin -Force | Out-Null
+          $env:CGO_ENABLED = '0'
+          go build -o bin\ds-pow.exe ./cmd/powd
+          if ($LASTEXITCODE -ne 0) { throw 'go build 失败' }
+          if (-not (Test-Path bin\ds-pow.exe)) { throw '未生成 bin\ds-pow.exe' }
+          Write-Host 'PoW 求解器已编译'
+
+          # ---------- 2. 便携 Node.exe ----------
+          $Out = Join-Path $env:RUNNER_TEMP 'fuckds-onekey'
+          if (Test-Path $Out) { Remove-Item $Out -Recurse -Force }
+          New-Item -ItemType Directory -Path (Join-Path $Out 'runtime') -Force | Out-Null
+
+          $nodeExe = $null
+          $nodeZip = Join-Path $env:RUNNER_TEMP 'node-win.zip'
+          $urls = @(
+            'https://nodejs.org/dist/v22.14.0/node-v22.14.0-win-x64.zip',
+            'https://npmmirror.com/mirrors/node/v22.14.0/node-v22.14.0-win-x64.zip'
+          )
+          foreach ($u in $urls) {
+            try {
+              Invoke-WebRequest -Uri $u -OutFile $nodeZip -UseBasicParsing -TimeoutSec 300
+              $tmp = Join-Path $env:RUNNER_TEMP 'node-unzip'
+              if (Test-Path $tmp) { Remove-Item $tmp -Recurse -Force }
+              Expand-Archive -Path $nodeZip -DestinationPath $tmp -Force
+              $found = Get-ChildItem -Path $tmp -Filter 'node.exe' -Recurse -File | Select-Object -First 1
+              if ($found) { $nodeExe = $found.FullName; break }
+            } catch {
+              Write-Host "下载失败，换源：$u"
+            }
+          }
+          if (-not $nodeExe) {
+            $nodeExe = (Get-Command node).Source
+            Write-Host "改用 setup-node 自带的 node.exe：$nodeExe"
+          }
+          Copy-Item $nodeExe (Join-Path $Out 'runtime\node.exe') -Force
+
+          # ---------- 3. 复制完整源码（AGPL：二进制随包附对应源码） ----------
+          $skip = @('.git', 'data', 'fuckds-onekey-win-x64.zip')
+          Get-ChildItem -Path $Repo -Force |
+            Where-Object { $skip -notcontains $_.Name } |
+            ForEach-Object { Copy-Item -Path $_.FullName -Destination $Out -Recurse -Force }
+
+          # ---------- 4. 写配置与启动脚本（UTF-8 无 BOM） ----------
+          function Write-NoBom($path, $lines) {
+            $text = ($lines -join "`r`n") + "`r`n"
+            [System.IO.File]::WriteAllText($path, $text, [System.Text.UTF8Encoding]::new($false))
+          }
+
+          Write-NoBom (Join-Path $Out '.env') @(
+            'ENGINE=direct'
+            'POW_BIN=bin/ds-pow.exe'
+            'HOST=127.0.0.1'
+            'PORT=8787'
+            'API_KEY='
+            'CORS_ORIGIN=*'
+            'DEEPSEEK_THINKING=always'
+          )
+
+          Write-NoBom (Join-Path $Out '启动.bat') @(
+            '@echo off'
+            'chcp 65001 >nul'
+            'title fuckds'
+            'cd /d "%~dp0"'
+            'set "DATA_DIR=%USERPROFILE%\.fuckds"'
+            'if not exist "%DATA_DIR%" mkdir "%DATA_DIR%"'
+            'if not exist "%DATA_DIR%\auth.json" ('
+            '  echo.'
+            '  echo  首次使用：粘贴 DeepSeek 网页版 userToken 后回车'
+            '  echo  取法：登录 chat.deepseek.com - F12 - Application - Local Sto
