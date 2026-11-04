@@ -103,11 +103,31 @@ jobs:
           }
           Copy-Item $nodeExe (Join-Path $Out 'runtime\node.exe') -Force
 
-          # ---------- 3. 复制完整源码（AGPL：二进制随包附对应源码） ----------
-          $skip = @('.git', 'data', 'fuckds-onekey-win-x64.zip')
-          Get-ChildItem -Path $Repo -Force |
-            Where-Object { $skip -notcontains $_.Name } |
-            ForEach-Object { Copy-Item -Path $_.FullName -Destination $Out -Recurse -Force }
+          # ---------- 3. 复制源码与依赖 ----------
+          # 注意：勾了 with_admin 后，npm --prefix web install 会在
+          # web\node_modules\fuckds 建一个指向项目根的 junction（符号链接）。
+          # Copy-Item -Recurse 会跟着它无限递归，路径越拼越长直到报错。
+          # 改用 robocopy /XJ（跳过所有 reparse point）+ /XD 排除 node_modules。
+          # 3a. 项目自身源码（含 web/dist、LICENSE、*.go 等，满足 AGPL 对应源码）
+          & robocopy $Repo $Out /E /XJ /XD .git data node_modules 'web\node_modules' 'test\.artifacts' /XF .env '*.bak' fuckds-onekey-win-x64.zip /NFL /NDL /NJH /NJS /NP
+          if ($LASTEXITCODE -ge 8) { throw "robocopy 源码失败（exit $LASTEXITCODE）" }
+          Write-Host '源码复制完成'
+
+          # 3b. 根 node_modules 单独复制（服务运行时需要 playwright 等）
+          # /XJ 同样关键：npm 的 .bin、部分包内部也可能有 junction
+          $nmSrc = Join-Path $Repo 'node_modules'
+          if (Test-Path $nmSrc) {
+            & robocopy $nmSrc (Join-Path $Out 'node_modules') /E /XJ /NFL /NDL /NJH /NJS /NP
+            if ($LASTEXITCODE -ge 8) { throw "robocopy node_modules 失败（exit $LASTEXITCODE）" }
+            Write-Host 'node_modules 复制完成'
+          }
+
+          # 3c. 兜底自检：确认运行必需的文件都在
+          foreach ($must in @('src\index.mjs', 'scripts\auth.mjs', 'bin\ds-pow.exe', 'runtime\node.exe')) {
+            if (-not (Test-Path (Join-Path $Out $must))) { throw "包内缺少 $must" }
+          }
+          if (-not (Test-Path (Join-Path $Out 'LICENSE'))) { Write-Host '提示：仓库里没有 LICENSE 文件' }
+          Write-Host '包内关键文件校验通过'
 
           # ---------- 4. 写配置与启动脚本（UTF-8 无 BOM） ----------
           function Write-NoBom($path, $lines) {
