@@ -135,4 +135,82 @@ jobs:
             'if not exist "%DATA_DIR%\auth.json" ('
             '  echo.'
             '  echo  首次使用：粘贴 DeepSeek 网页版 userToken 后回车'
-            '  echo  取法：登录 chat.deepseek.com - F12 - Application - Local Sto
+            '  echo  取法：登录 chat.deepseek.com - F12 - Application - Local Storage - userToken - value'
+            '  echo.'
+            '  "runtime\node.exe" "scripts\auth.mjs"'
+            '  echo.'
+            ')'
+            'echo.'
+            'echo  健康检查： http://127.0.0.1:8787/healthz'
+            'echo  Base URL ： http://127.0.0.1:8787/v1    模型：deepseek-flash'
+            'echo  关闭本窗口即停止服务'
+            'echo.'
+            '"runtime\node.exe" "src\index.mjs"'
+            'pause'
+          )
+
+          Write-NoBom (Join-Path $Out '重配Token.bat') @(
+            '@echo off'
+            'chcp 65001 >nul'
+            'title fuckds - 重配 Token'
+            'cd /d "%~dp0"'
+            'set "DATA_DIR=%USERPROFILE%\.fuckds"'
+            '"runtime\node.exe" "scripts\auth.mjs"'
+            'pause'
+          )
+
+          Write-NoBom (Join-Path $Out '说明.txt') @(
+            'fuckds Windows 绿色一键包（由 GitHub Actions 自动构建）'
+            ''
+            '1. 解压到纯英文路径（不要放中文目录、不要放 Program Files）'
+            '2. 双击「启动.bat」，首次粘贴 userToken 后回车'
+            '3. 浏览器打开 http://127.0.0.1:8787/healthz 检查状态'
+            '4. 客户端填：Base URL = http://127.0.0.1:8787/v1 ，模型 = deepseek-flash ，Key 随便填'
+            '5. 换账号 / token 失效：双击「重配Token.bat」'
+            ''
+            '已内置 node.exe 与 ds-pow.exe，本机不需要安装 Node / Go / git。'
+            '登录态与日志保存在 %USERPROFILE%\.fuckds ，重新解压不会丢。'
+            '服务只监听 127.0.0.1；需要鉴权请在 .env 里设置 API_KEY，请勿暴露到公网。'
+            ''
+            '本包含完整对应源码，许可证 AGPLv3，见 LICENSE。'
+            '第三方逆向项目，请遵守 DeepSeek 服务条款；账号限流/风控/封禁风险自负，'
+            '仅限个人自用，不要对外提供服务或商用。'
+          )
+
+          # ---------- 5. 压缩 ----------
+          $zipOut = Join-Path $Work 'fuckds-onekey-win-x64.zip'
+          if (Test-Path $zipOut) { Remove-Item $zipOut -Force }
+          $7z = 'C:\Program Files\7-Zip\7z.exe'
+          if (Test-Path $7z) {
+            & $7z a -tzip -mx=5 $zipOut $Out | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw '7z 压缩失败' }
+          } else {
+            Compress-Archive -Path $Out -DestinationPath $zipOut -CompressionLevel Optimal -Force
+          }
+          $hash = (Get-FileHash $zipOut -Algorithm SHA256).Hash
+          Write-Host ('完成：{0:N1} MB  SHA256={1}' -f ((Get-Item $zipOut).Length / 1MB), $hash)
+
+      - name: 上传 zip（在页面底部 Artifacts 下载）
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuckds-onekey-win-x64
+          path: fuckds-onekey-win-x64.zip
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: 发布到 Release（可选）
+        if: ${{ inputs.publish_release == true }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: win-${{ github.run_number }}
+          name: Windows 绿色一键包 #${{ github.run_number }}
+          files: fuckds-onekey-win-x64.zip
+          body: |
+            由 GitHub Actions 在 windows-latest 上自动构建。
+
+            解压到纯英文路径，双击「启动.bat」，粘贴 userToken 即可；本机无需 Node / Go / git。
+            源码随包附带（AGPLv3，见 LICENSE）。
+
+            仅限个人自用，请遵守 DeepSeek 服务条款。
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
